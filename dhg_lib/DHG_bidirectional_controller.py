@@ -1,7 +1,9 @@
 from socket import *
+# from dhg source code
 import src
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import JointState 
 from proto_util import ctrl_command_pb2 as command
+
 import time as T
 import threading
 
@@ -18,6 +20,9 @@ class DHG_Bidirectional:
         self.host_ip = host_ip
         self.host_port = host_port
         self.sock = None
+        self.L2R_enabled = False
+        self.R2L_enabled = False
+        self.command_write_worker_i = None
         self.frame_read_worker_i = None
         self.dhg_connected = False
         # Uncomment if using ROS
@@ -45,10 +50,10 @@ class DHG_Bidirectional:
 
     def dex_force(self, set_point, stiffness, rest=True):
         """
-        Works same as before - set force parameters for all joints
+        set force parameters for all joints
         
-        :param set_point: Set point value for joints
-        :param stiffness: Stiffness value for joints
+        :param set_point: Set point value for joints ∈ [0, 1] | 0 open (0 radian), 1 closed (1.57 radian) -> check later
+        :param stiffness: Stiffness value for joints ∈ [0, 1] | 0 soft, 1 hard
         :param rest: If True, relax all joints
         """
         if not rest:
@@ -97,7 +102,7 @@ class DHG_Bidirectional:
         return self.new_impedance_control
     
  
-    def set_command_write_worker(self):
+    def _set_command_write_worker(self):
         """
         Thread function to run the command write worker
         """
@@ -107,20 +112,11 @@ class DHG_Bidirectional:
             name="Thread_command_worker"
         )
         command_thread.start()
+        self.R2L_enabled = True
         self.threads.append(command_thread)
         print("Command write worker thread started")
 
-    def set_frame_read_worker(self,publish_flag=True):
-            print("initialization of frame read worker")
-            self.frame_read_worker_i = src.frame_read_worker(self.sock)
-            print("frame read worker initialized")
-            print("initialization of joint state publisher")
-            self.Joint=JointState()
-            self.Joint.name = ['thumb_rotate','thumb_split','thumb_bend', 'index_split','index_bend',
-		    'middle_split','middle_bend', 'ring_split','ring_bend', 'last_split','last_bend']
-            self.Joint.position = [0,0,0, 0,0, 0,0, 0,0, 0,0]
-            print("joint state publisher initialized")
-            
+
 
     
     def test_write_worker(self, stiffness, set_point):
@@ -131,11 +127,23 @@ class DHG_Bidirectional:
         :param stiffness: Stiffness value to set
         :param set_point: Set point value to set
         """
-        print("inside test worker")
-        self.dex_force(set_point, stiffness, False)  # Set to False to apply forces
-        self.command_write_worker_i.add_new_impedance_control(337785601,self.set_test_impedance_control())
-        print("sleeping for 5 seconds to observe effect...")
-        T.sleep(5)
+        if self.command_write_worker_i is None:
+
+            print("Command write worker is initializating...")
+            try:
+                self._set_command_write_worker()
+                T.sleep(1)  # Sleep for 1 second to ensure the worker is ready
+                print("Command write worker initialized successfully.")
+                self.R2L_enabled = True
+            except Exception as e:
+                print("Failed to initialize command write worker: {e}".format(e=e))
+                return None
+        if self.R2L_enabled:
+            print("inside test worker")
+            self.dex_force(set_point, stiffness, False)  # Set to False to apply forces
+            self.command_write_worker_i.add_new_impedance_control(337785601,self.set_test_impedance_control())
+            print("sleeping for 5 seconds to observe effect...")
+            T.sleep(5)
 
 
 
@@ -180,24 +188,22 @@ class DHG_Bidirectional:
 
 
     
-    def publish_joint_state(self,publish_flag=True):
+    def publish_joint_state(self,verbose=True,sleep_time=1):
         """
         print("----------Publish joint state data------")
         """
         try:
-           
+            if verbose:
+                print("----------Publish joint state data------")
+
             print("initialization of valset")
-            valset=self.frame_read_worker_i.worker()
-            print("valset initialized")
-            # test_iter=0
-            if publish_flag:
-                # test_iter+=1
-                print("Publishing joint state, iteration: {0}".format(test_iter))
-                # if test_iter > 10:
-                #     publish_flag = False
-                #     break
-                # for i in range(11):
-                #     self.Joint.position[i]=valset[i]
+            if self.frame_read_worker_i is None:
+                print("frame_read_worker_i is None, initializing...")
+                valset=src.frame_read_worker_i(self.sock)
+                print("valset initialized")
+                self.R2L_enabled = True
+
+            if self.R2L_enabled:
                 self.Joint.position = [valset[i] for i in range(11)]
                 print("inside IMC 25 demo")
                 print("thumb: {0}".format(valset[2]))
@@ -205,15 +211,19 @@ class DHG_Bidirectional:
                 print("middle: {0}".format(valset[6]))    
                 print("ring: {0}".format(valset[8]))
                 print("pinky: {0}".format(valset[10]))
-                t=1
+                
                 print("sleeping for {} seconds".format(t))
-                T.sleep(t)
+                T.sleep(sleep_time)
                 return [round(valset[2*i], 3) for i in range(1,6)]
+            else:
+                print("R2L is not enabled. Cannot publish joint state data.")
+                return None
             
         except Exception as e:
             print("Exception in publish_joint_state: " + str(e))
+            self.R2L_enabled = False
             self.stop()
-            publish_flag = False
+            
 
 
     def stop(self):
@@ -223,6 +233,7 @@ class DHG_Bidirectional:
         if self.sock:
             self.sock.close()
             print("Socket connection closed")
+            self.dhg_connected = False
 
 # Example usage
 # if __name__ == "__main__":
