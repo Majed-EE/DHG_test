@@ -9,7 +9,7 @@ import threading
 
 
 class DHG_Bidirectional:
-    def __init__(self, host_ip="127.0.0.1", host_port=5555):
+    def __init__(self, host_ip="127.0.0.1", host_port=55555):
         """
         Initialize the Haptic Glove Publisher class
         
@@ -22,13 +22,15 @@ class DHG_Bidirectional:
         self.sock = None
         self.L2R_enabled = False
         self.R2L_enabled = False
-        self.command_write_worker_i = None
-        self.frame_read_worker_i = None
+        
+
+        self.frame_read_worker_i=None
+        self.valset = None
         self.dhg_connected = False
         # Uncomment if using ROS
         # self.pub = None
         # self.pub2 = None
-        # self.Joint = None
+        self.Joint = None
 
         # for stiffness control
         self.command_write_worker_i = None
@@ -36,6 +38,7 @@ class DHG_Bidirectional:
         
 
         # direction Feedback
+        self.command_read_worker_i = None
         self.cmd_dict = {}
         self.threads = []
         self.joint_names = ["Thumb", "Index", "Middle", "Ring", "Pinky"]
@@ -51,17 +54,20 @@ class DHG_Bidirectional:
     def dex_force(self, set_point, stiffness, rest=True):
         """
         set force parameters for all joints
-        
-        :param set_point: Set point value for joints ∈ [0, 1] | 0 open (0 radian), 1 closed (1.57 radian) -> check later
-        :param stiffness: Stiffness value for joints ∈ [0, 1] | 0 soft, 1 hard
+        TODO: set_point and stiffness should be a list of 5 values for each joint 
+        :param set_point: Set point value for joints - [0, 1] | 0 open (0 radian), 1 closed (1.57 radian) 
+        :param stiffness: Stiffness value for joints - [0, 1] | 0 soft, 1 hard
         :param rest: If True, relax all joints
         """
         if not rest:
+            
+            if len(set_point) != 5 or len(stiffness) != 5:
+                raise ValueError("set_point and stiffness must be lists of 5 values each.")
             for x in range(len(self.joint_names)):
-                if stiffness > 0:
+                if stiffness[x] > 0:
                     self.cmd_dict[self.joint_names[x]] = {
-                        "Stiffness": stiffness, 
-                        "SetPoint": set_point
+                        "Stiffness": stiffness[x], 
+                        "SetPoint": set_point[x]
                     }
                 else:
                     self.cmd_dict[self.joint_names[x]] = {
@@ -78,12 +84,12 @@ class DHG_Bidirectional:
         
         print(self.cmd_dict)
     
-    def set_test_impedance_control(self):
+    def _set_test_impedance_control(self):
         """
         Create impedance control command from current cmd_dict
         """
 
-        
+        print("Setting test impedance control with cmd_dict: {0}".format(self.cmd_dict))
         self.new_impedance_control = command.ImpedanceControl()
         
         # Set values from cmd_dict
@@ -141,9 +147,10 @@ class DHG_Bidirectional:
         if self.R2L_enabled:
             print("inside test worker")
             self.dex_force(set_point, stiffness, False)  # Set to False to apply forces
-            self.command_write_worker_i.add_new_impedance_control(337785601,self.set_test_impedance_control())
-            print("sleeping for 5 seconds to observe effect...")
-            T.sleep(5)
+            print("sleeping for 1 seconds to observe effect...")
+            T.sleep(1)
+            self.command_write_worker_i.add_new_impedance_control(337785601,self._set_test_impedance_control())
+            
 
 
 
@@ -169,23 +176,6 @@ class DHG_Bidirectional:
         #         0,0]
         pass
         
-    def connect(self):
-        """
-        Connect to the server
-        """
-        try:
-            self.sock = socket.socket(AF_INET, SOCK_STREAM)
-            print("Connecting to {0}:{1}".format(self.host_ip, self.host_port))
-            self.sock.connect((self.host_ip, self.host_port))
-            print("Connected successfully")
-            self.dhg_connected = True
-            return True
-        except Exception as e:
-            print("Connection failed: " + str(e))
-            self.dhg_connected = False
-            return False
-
-
 
     
     def publish_joint_state(self,verbose=True,sleep_time=1):
@@ -196,25 +186,32 @@ class DHG_Bidirectional:
             if verbose:
                 print("----------Publish joint state data------")
 
-            print("initialization of valset")
+            print("Initialization of valset")
             if self.frame_read_worker_i is None:
                 print("frame_read_worker_i is None, initializing...")
-                valset=src.frame_read_worker_i(self.sock)
-                print("valset initialized")
+                try:
+                    self.frame_read_worker_i = src.frame_read_worker(self.sock)
+                    self.valset = self.frame_read_worker_i.worker()
+                    print("frameread_worker initialized successfully")
+                    self.R2L_enabled = True
+                except Exception as e:
+                    print("Failed to initialize frame_read_worker: {e}".format(e=e))
+                    self.R2L_enabled = False
+                    return None
                 self.R2L_enabled = True
 
             if self.R2L_enabled:
-                self.Joint.position = [valset[i] for i in range(11)]
-                print("inside IMC 25 demo")
-                print("thumb: {0}".format(valset[2]))
-                print("index: {0}".format(valset[4]))
-                print("middle: {0}".format(valset[6]))    
-                print("ring: {0}".format(valset[8]))
-                print("pinky: {0}".format(valset[10]))
+                self.valset = self.frame_read_worker_i.worker()
+                self.Joint.position = [self.valset[i] for i in range(11)]
+                print("thumb: {0}".format(self.valset[2]))
+                print("index: {0}".format(self.valset[4]))
+                print("middle: {0}".format(self.valset[6]))    
+                print("ring: {0}".format(self.valset[8]))
+                print("pinky: {0}".format(self.valset[10]))
                 
-                print("sleeping for {} seconds".format(t))
+                print("sleeping for {} seconds".format(sleep_time))
                 T.sleep(sleep_time)
-                return [round(valset[2*i], 3) for i in range(1,6)]
+                return [round(self.valset[2*i], 3) for i in range(1,6)]
             else:
                 print("R2L is not enabled. Cannot publish joint state data.")
                 return None
@@ -224,6 +221,46 @@ class DHG_Bidirectional:
             self.R2L_enabled = False
             self.stop()
             
+
+
+
+
+    def connect(self):
+        """
+        Connect to the server
+        """
+        try:
+            self.sock = socket(AF_INET, SOCK_STREAM)
+            print("Connecting to {0}:{1}".format(self.host_ip, self.host_port))
+            self.sock.connect((self.host_ip, self.host_port))
+            print("Connected successfully")
+            self.dhg_connected = True
+            self.frame_read_worker_i=src.frame_read_worker(self.sock)
+            self.R2L_enabled = True
+            self.Joint = JointState()
+            self.Joint.name = ['thumb_rotate','thumb_split','thumb_bend',
+            'index_split','index_bend',
+            'middle_split','middle_bend',
+            'ring_split','ring_bend',	
+            'last_split','last_bend']
+            # self.Joint.name = ['thumb_rotate','thumb_split','thumb_bend',
+            return True
+        except Exception as e:
+            print("Connection failed: " + str(e))
+            self.dhg_connected = False
+            return False
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     def stop(self):
